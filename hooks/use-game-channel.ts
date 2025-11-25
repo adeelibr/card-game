@@ -25,13 +25,14 @@ import {
   isThullaGameOver,
   sortHandThulla,
 } from "@/lib/thulla-logic"
+import { getBrowserSessionId } from "@/lib/browser-session"
 
 interface UseGameChannelOptions {
   roomId: string
   playerName: string
   password: string
   isCreator: boolean
-  gameType?: GameType // Add game type option
+  gameType?: GameType
 }
 
 interface PresenceState {
@@ -39,6 +40,7 @@ interface PresenceState {
   name: string
   isAdmin: boolean
   joinedAt: string
+  browserSessionId: string
 }
 
 export function useGameChannel({ roomId, playerName, password, isCreator, gameType = "rung" }: UseGameChannelOptions) {
@@ -46,17 +48,17 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
   const [playerId, setPlayerId] = useState<string | null>(null)
   const [error, setError] = useState<string>("")
   const [isConnected, setIsConnected] = useState(false)
+  const [joinRejected, setJoinRejected] = useState<string | null>(null)
 
   const channelRef = useRef<RealtimeChannel | null>(null)
   const supabase = createClient()
   const playerIdRef = useRef<string>(`player-${Date.now()}-${Math.random().toString(36).slice(2)}`)
+  const browserSessionIdRef = useRef<string>(typeof window !== "undefined" ? getBrowserSessionId(roomId) : "")
 
-  // Initialize game state for creator
   const initGameState = useCallback(() => {
     return createInitialGameState(roomId, password, gameType)
   }, [roomId, password, gameType])
 
-  // Process game actions (runs on admin client)
   const processAction = useCallback((state: GameState, action: ClientMessage, senderId: string): GameState => {
     const newState = { ...state }
     const isThulla = state.gameType === "thulla"
@@ -72,6 +74,22 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
         const existingPlayer = state.players.find((p) => p.id === senderId)
         if (existingPlayer) return state
 
+        if (action.browserSessionId) {
+          const duplicateBrowser = state.players.find(
+            (p) => p.browserSessionId === action.browserSessionId && p.isConnected,
+          )
+          if (duplicateBrowser) {
+            return state
+          }
+        }
+
+        const duplicateName = state.players.find(
+          (p) => p.name.toLowerCase() === action.playerName.toLowerCase() && p.isConnected,
+        )
+        if (duplicateName) {
+          return state
+        }
+
         const position = state.players.length
         const team = isThulla ? "none" : position % 2 === 0 ? "A" : "B"
         const newPlayer: Player = {
@@ -84,6 +102,7 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
           position,
           isOut: false,
           isThulla: false,
+          browserSessionId: action.browserSessionId,
         }
         newState.players = [...state.players, newPlayer]
         newState.message = `${newPlayer.name} joined! (${newState.players.length}/${state.maxPlayers})`
@@ -112,7 +131,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             message: `${startingPlayer?.name} starts with Ace of Spades!`,
           }
         } else {
-          // Rung game start logic (existing)
           const deck = shuffleDeck(createDeck())
           const dealerId = state.players[0].id
           const trumpCallerIndex = 3
@@ -163,14 +181,12 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
         const card = player.hand.find((c) => c.id === action.cardId)
         if (!card) return state
 
-        // Validate card based on game type
         const validCards = isThulla
           ? getValidCardsThulla(player, state.currentTrick)
           : getValidCards(player, state.currentTrick)
 
         if (!validCards.some((c) => c.id === action.cardId)) return state
 
-        // Remove card from hand
         const updatedPlayers = state.players.map((p) =>
           p.id === senderId ? { ...p, hand: p.hand.filter((c) => c.id !== action.cardId) } : p,
         )
@@ -187,38 +203,31 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             newTrick.cards.length ===
             activePlayers.length + (updatedPlayers.find((p) => p.id === senderId)?.hand.length === 0 ? 0 : 0)
 
-          // Check if all active players have played
           const activePlayerIds = activePlayers.map((p) => p.id)
           const playersWhoPlayed = newTrick.cards.map((c) => c.playerId)
           const allActivePlayed = activePlayerIds.every((id) => playersWhoPlayed.includes(id))
 
           if (allActivePlayed) {
-            // Trick is complete
             const thullaPlayed = hasThullaPlayed(newTrick)
 
             if (thullaPlayed) {
-              // Someone broke suit - highest lead suit card player picks up
               const pickupPlayerId = findPickupPlayer(newTrick)
               const pickupPlayer = updatedPlayers.find((p) => p.id === pickupPlayerId)
 
               if (pickupPlayer) {
-                // Add all trick cards to pickup player's hand
                 const trickCards = newTrick.cards.map((c) => c.card)
                 const finalPlayers = updatedPlayers.map((p) =>
                   p.id === pickupPlayerId ? { ...p, hand: sortHandThulla([...p.hand, ...trickCards]) } : p,
                 )
 
-                // Check if someone went out (player who played the thulla might be out)
                 const playerWhoPlayedThulla = newTrick.cards.find((c) => c.card.suit !== newTrick.leadSuit)?.playerId
                 const thullaPlayerObj = finalPlayers.find((p) => p.id === playerWhoPlayedThulla)
 
-                // Mark players as out if they have no cards
                 const playersWithOutStatus = finalPlayers.map((p) => ({
                   ...p,
                   isOut: p.hand.length === 0,
                 }))
 
-                // Check if game is over
                 const gameOverCheck = isThullaGameOver(playersWithOutStatus)
 
                 if (gameOverCheck.isOver) {
@@ -242,11 +251,8 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
                   }
                 }
 
-                // Find next leader (pickup player leads)
-                const nextActivePlayers = getActivePlayers(playersWithOutStatus)
                 let nextPlayerId = pickupPlayerId
 
-                // If pickup player is out, find next active player
                 if (playersWithOutStatus.find((p) => p.id === pickupPlayerId)?.isOut) {
                   const pickupIndex = state.players.findIndex((p) => p.id === pickupPlayerId)
                   for (let i = 1; i <= state.players.length; i++) {
@@ -268,17 +274,14 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
                 }
               }
             } else {
-              // No thulla - trick goes to waste pile, highest card leads next
               const nextLeaderId = findNextLeader(newTrick)
               const nextLeader = updatedPlayers.find((p) => p.id === nextLeaderId)
 
-              // Mark players as out
               const playersWithOutStatus = updatedPlayers.map((p) => ({
                 ...p,
                 isOut: p.hand.length === 0,
               }))
 
-              // Check if game is over
               const gameOverCheck = isThullaGameOver(playersWithOutStatus)
 
               if (gameOverCheck.isOver) {
@@ -303,7 +306,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
                 }
               }
 
-              // Find next leader - if they're out, find next active player
               let nextPlayerId = nextLeaderId
               if (playersWithOutStatus.find((p) => p.id === nextLeaderId)?.isOut) {
                 const leaderIndex = state.players.findIndex((p) => p.id === nextLeaderId)
@@ -328,7 +330,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             }
           }
 
-          // Not all players have played yet - find next active player
           const currentIndex = state.players.findIndex((p) => p.id === senderId)
           let nextPlayerId: string | null = null
 
@@ -341,7 +342,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             }
           }
 
-          // Mark current player as out if they have no cards
           const playersWithOutStatus = updatedPlayers.map((p) => ({
             ...p,
             isOut: p.hand.length === 0,
@@ -474,7 +474,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             message: `Round ${state.roundNumber + 1}! ${startingPlayer?.name} starts.`,
           }
         } else {
-          // Rung new round (existing)
           const deck = shuffleDeck(createDeck())
           const currentDealerIndex = state.players.findIndex((p) => p.id === state.dealerId)
           const newDealerIndex = (currentDealerIndex + 1) % 4
@@ -523,7 +522,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
     }
   }, [])
 
-  // Send action to channel
   const sendAction = useCallback(
     (action: ClientMessage) => {
       if (!channelRef.current || !playerId) return
@@ -537,7 +535,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
     [playerId],
   )
 
-  // Game action handlers
   const startGame = useCallback(() => {
     sendAction({ type: "start-game" })
   }, [sendAction])
@@ -560,9 +557,9 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
     sendAction({ type: "new-round" })
   }, [sendAction])
 
-  // Setup channel
   useEffect(() => {
     const id = playerIdRef.current
+    const browserSessionId = browserSessionIdRef.current
     setPlayerId(id)
 
     const channel = supabase.channel(`game-room-${roomId}`, {
@@ -574,7 +571,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
 
     channelRef.current = channel
 
-    // Handle broadcast messages
     channel.on("broadcast", { event: "game-action" }, ({ payload }) => {
       const { action, senderId } = payload as { action: ClientMessage; senderId: string }
 
@@ -583,6 +579,40 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
 
         const isAdmin = currentState.players[0]?.id === id
         if (isAdmin) {
+          if (action.type === "join") {
+            if (action.browserSessionId) {
+              const duplicateBrowser = currentState.players.find(
+                (p) => p.browserSessionId === action.browserSessionId && p.isConnected,
+              )
+              if (duplicateBrowser) {
+                channel.send({
+                  type: "broadcast",
+                  event: "join-rejected",
+                  payload: {
+                    targetId: senderId,
+                    reason: "You already have this room open in another tab",
+                  },
+                })
+                return currentState
+              }
+            }
+
+            const duplicateName = currentState.players.find(
+              (p) => p.name.toLowerCase() === action.playerName.toLowerCase() && p.isConnected,
+            )
+            if (duplicateName) {
+              channel.send({
+                type: "broadcast",
+                event: "join-rejected",
+                payload: {
+                  targetId: senderId,
+                  reason: `Username "${action.playerName}" is already taken in this room`,
+                },
+              })
+              return currentState
+            }
+          }
+
           const newState = processAction(currentState, action, senderId)
 
           channel.send({
@@ -597,13 +627,19 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
       })
     })
 
-    // Handle state updates (for non-admin players)
+    channel.on("broadcast", { event: "join-rejected" }, ({ payload }) => {
+      const { targetId, reason } = payload as { targetId: string; reason: string }
+      if (targetId === id) {
+        setJoinRejected(reason)
+        setError(reason)
+      }
+    })
+
     channel.on("broadcast", { event: "state-update" }, ({ payload }) => {
       const { state } = payload as { state: GameState }
       setGameState(state)
     })
 
-    // Handle presence
     channel.on("presence", { event: "sync" }, () => {
       const presenceState = channel.presenceState<PresenceState>()
     })
@@ -619,7 +655,6 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
       })
     })
 
-    // Subscribe to channel
     channel.subscribe(async (status) => {
       if (status === "SUBSCRIBED") {
         setIsConnected(true)
@@ -629,13 +664,18 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
           name: playerName,
           isAdmin: isCreator,
           joinedAt: new Date().toISOString(),
+          browserSessionId,
         })
 
         if (isCreator) {
           const initialState = initGameState()
           setGameState(initialState)
 
-          const stateWithCreator = processAction(initialState, { type: "join", playerName, password }, id)
+          const stateWithCreator = processAction(
+            initialState,
+            { type: "join", playerName, password, browserSessionId },
+            id,
+          )
           setGameState(stateWithCreator)
 
           await channel.send({
@@ -648,7 +688,7 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
             type: "broadcast",
             event: "game-action",
             payload: {
-              action: { type: "join", playerName, password },
+              action: { type: "join", playerName, password, browserSessionId },
               senderId: id,
             },
           })
@@ -669,6 +709,7 @@ export function useGameChannel({ roomId, playerName, password, isCreator, gameTy
     playerId,
     error,
     isConnected,
+    joinRejected,
     startGame,
     playCard,
     selectTrump,

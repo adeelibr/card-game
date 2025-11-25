@@ -8,6 +8,8 @@ import { GameBoard } from "@/components/game-board"
 import { ThullaGameBoard } from "@/components/thulla-game-board"
 import { useGameChannel } from "@/hooks/use-game-channel"
 import type { GameType } from "@/lib/game-types"
+import { clearBrowserSession } from "@/lib/browser-session"
+import { Button } from "@/components/ui/button"
 
 export default function RoomPage() {
   const params = useParams()
@@ -23,16 +25,39 @@ export default function RoomPage() {
     nameFromUrl ? { name: nameFromUrl, password: passwordFromUrl } : null,
   )
 
-  const { gameState, playerId, error, isConnected, startGame, playCard, selectTrump, newRound } = useGameChannel({
-    roomId,
-    playerName: joinData?.name || "",
-    password: joinData?.password || "",
-    isCreator,
-    gameType: gameTypeFromUrl, // Pass game type to hook
-  })
+  const { gameState, playerId, error, isConnected, joinRejected, startGame, playCard, selectTrump, newRound } =
+    useGameChannel({
+      roomId,
+      playerName: joinData?.name || "",
+      password: joinData?.password || "",
+      isCreator,
+      gameType: gameTypeFromUrl,
+    })
 
   const handleJoin = (name: string, _roomId: string, password: string) => {
     setJoinData({ name, password })
+  }
+
+  const handleGoBack = () => {
+    clearBrowserSession(roomId)
+    window.location.href = "/"
+  }
+
+  if (joinRejected) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4">
+        <div className="bg-card border-4 border-foreground shadow-[8px_8px_0px_0px_rgba(0,0,0,1)] p-8 text-center max-w-md">
+          <div className="w-16 h-16 bg-destructive border-4 border-foreground flex items-center justify-center mx-auto mb-4">
+            <span className="text-destructive-foreground text-3xl font-bold">!</span>
+          </div>
+          <h2 className="text-2xl font-bold mb-2">Cannot Join Room</h2>
+          <p className="text-muted-foreground mb-6">{joinRejected}</p>
+          <Button onClick={handleGoBack} className="w-full">
+            Go Back to Home
+          </Button>
+        </div>
+      </div>
+    )
   }
 
   // Loading state
@@ -50,7 +75,7 @@ export default function RoomPage() {
 
   // Show join form if no name provided
   if (!joinData) {
-    return <JoinForm roomId={roomId} onJoin={handleJoin} onCreate={() => {}} />
+    return <JoinForm roomId={roomId} onJoin={handleJoin} onCreate={() => {}} error={error} />
   }
 
   // Show lobby if waiting for players

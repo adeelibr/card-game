@@ -21,6 +21,7 @@ export interface Player {
   position: number // Changed from fixed 0-3 to allow 3-6 players in Thulla
   isOut?: boolean // For Thulla - player has shed all cards
   isThulla?: boolean // For Thulla - the loser
+  browserSessionId?: string // Added to track unique browser sessions
 }
 
 export interface Trick {
@@ -78,7 +79,7 @@ export interface RoomInfo {
 }
 
 export type ClientMessage =
-  | { type: "join"; playerName: string; password?: string }
+  | { type: "join"; playerName: string; password?: string; browserSessionId?: string } // Added browserSessionId for duplicate detection
   | { type: "start-game" }
   | { type: "select-trump"; suit: Suit }
   | { type: "play-card"; cardId: string }
